@@ -36,8 +36,8 @@ function [modelCom,infoCom,indCom] = createCommModel(modelCell, options)
 %               'infoCom' and 'indCom', which are also outputed as separate
 %               output argument. See below.
 % infoCom:      A structure of useful reaction names and organism names:
-%   spBm:          spBm{k} the biomass reaction of info.speciesAbbr{k}                                        
-%   spATPM:        spATPM{k} the ATP maintenance reaction of info.speciesAbbr{k}                                            
+%   spBm:          spBm{k} the biomass reaction of info.spAbbr{k}                                        
+%   spATPM:        spATPM{k} the ATP maintenance reaction of info.spAbbr{k}                                            
 %   rxnSD:         all sink and demand reactions other than the community exchange reactions (EXcom)
 %   EXcom:         EXcom{i,1} the community uptake reaction for community metabolite info.metCom{i}
 %                  EXcom{i,2} the community production reaction for community metabolite info.metCom{i}
@@ -45,25 +45,25 @@ function [modelCom,infoCom,indCom] = createCommModel(modelCell, options)
 %   Mcom:          community metabolites
 %   Msp:           Msp{i,k} the extracellular met of organism k
 %                  corresponding to community metabolite Mcom{i}
-%   speciesAbbr:   species abbreviation, used in mets and rxns                       
+%   spAbbr:   species abbreviation, used in mets and rxns                       
 %                  to identify species-specific metabolites                          
-%   speciesName:   full name of each species        
-%   rxnSps:        rxnSps{j} is the abbreviation of species k (speciesAbbr{k}) 
+%   spName:   full name of each species        
+%   rxnSps:        rxnSps{j} is the abbreviation of species k (spAbbr{k}) 
 %                  if reaction j is of species k. 'com' for community exchange reactions    
-%   metSps:        metSps{i} is the abbreviation of species k (speciesAbbr{k}) 
+%   metSps:        metSps{i} is the abbreviation of species k (spAbbr{k}) 
 %                  if metabolite i is of species k. 'com' for community exchange reactions 
 % indCom:       The corresponding reaction IDs and organism IDs:
 %   spBm:          reaction IDs for info.spBm
 %   spATPM:        reaction IDs for info.spATPM
-%   rxnSD:         reaction IDs for info.rxnSD 
+%   rxnSD:         reaction IDs for info.rxnSD
 %   EXcom:         reaction IDs for info.EXcom                               
 %   EXsp:          reaction IDs for info.EXsp. EXsp(i,k) = 0 if info.EXsp{i,k} is empty          
 %   Mcom:          metabolite IDs for info.Mcom
 %   Msp:           metabolite IDs for info.Msp
 %   rxnSps:        index.rxnSps(j) = k implies that reaction j is of                      
-%                  species info.speciesName{k}. = 0 for community exchange reactions    
+%                  species info.spName{k}. 0 for community exchange reactions    
 %   metSps:        index.metSps(i) = k implies that metabolite i is of                    
-%                  species info.speciesName{k}. = 0 for community metabolites             
+%                  species info.spName{k}. 0 for community metabolites             
 
 
 %% arguement checking
@@ -71,8 +71,8 @@ if ~exist('options', 'var')
     options = struct();
 end
 %get parameters
-[spAbbr,spName,spBm,spATPM,metExId,rxnField,metField] = getCobraComParams(...
-    {'spAbbr','spName','spBm','spATPM','metExId','rxnField','metField'}, options);
+[spAbbr,spName,spBm,spATPM,metExId,rxnField,metField,sepUtEx] = getCobraComParams(...
+    {'spAbbr','spName','spBm','spATPM','metExId','rxnField','metField','sepUtEx'}, options);
 %organisms' abbreviations and names
 nameSpecies = false;
 if isstruct(modelCell)
@@ -106,9 +106,7 @@ elseif iscell(spBm)
     spBm = rxnBiomassID;
 end
 %ATPM
-if isempty(spATPM)
-    spATPM = zeros(nSp,1);
-elseif iscell(spATPM)
+if iscell(spATPM)
     spATPM0 = spATPM;
     spATPM = zeros(nSp,1);
     for j = 1: nSp
@@ -130,10 +128,10 @@ for jSp = 1:nSp
 end
 [field,id] = unique(field);
 [fieldNumeric,fieldCell,fieldStruct] = deal(fieldNumeric(id),fieldCell(id),fieldStruct(id));
-%fields need special care
-id = ismember(field,{'S', 'rxns', 'mets', 'rev', 'lb', 'ub', 'c', 'b', 'metComs','rxnGeneMat','genes'});
+%fields that need special care
+id = ismember(field, {'S', 'rxns', 'mets', 'rev', 'lb', 'ub', 'c', 'b', 'metComs','rxnGeneMat','genes', 'grRules', 'rules'});
 [field,fieldNumeric,fieldCell,fieldStruct] = deal(field(~id),fieldNumeric(~id),fieldCell(~id),fieldStruct(~id));
-rxnField = unique([rxnField(:);{'grRules';'rules';'confidenceScores';'subSystems'}]);
+rxnField = unique([rxnField(:);{'confidenceScores';'subSystems'}]);
 
 modelCom = struct();
 for j = 1:numel(field)
@@ -181,14 +179,6 @@ metFieldL = strncmp('met',field,3) | metFieldKnown;
 rxnFieldL = strncmp('rxn',field,3) | rxnFieldKnown;
 %all other fields just put in a cell for each model
 spFieldL = ~metFieldL & ~rxnFieldL;
-
-% metField = union(setdiff(fieldAll(strncmp('met',fieldAll,3)),...
-%     {'mets','metNames','metFormulas','metSps'}),...
-%     metField);
-% %rxn-related fields
-% rxnField = union(setdiff(fieldAll(strncmp('rxn',fieldAll,3)),...
-%     {'rxns','rxnNames','rxnSps','rxnGeneMat','spBm','spATPM'}),...
-%     rxnField);
 
 row = 0;
 col = 0;
@@ -250,6 +240,9 @@ for j = 1:nSp
     S = [S                 sparse(row, colJ);...
          sparse(rowJ, col) sparse(modelCell{j}.S)];
     %reversibility, bounds, objective and RHS
+    if ~isfield(modelCell{j}, 'rev')
+        modelCell{j}.rev = double(modelCell{j}.lb < 0);
+    end
     rev = [rev; modelCell{j}.rev];
     lb = [lb; lbJ];
     ub = [ub; ubJ];
@@ -278,45 +271,53 @@ for j = 1:nSp
             sizeCk = 1;
         end
         if isfield(modelCell{j}, field{k})
-            if spFieldL(k) && ischar(modelCell{j}.(field{k}))
-                %If that is a string, put it in a cell.
-                modelCell{j}.(field{k}) = {modelCell{j}.(field{k})};
-            end
-            %check sizes
-            if size(modelCell{j}.(field{k}),1) ~= sizeCk
-                if size(modelCell{j}.(field{k}),2) == sizeCk
-                    fieldJK = modelCell{j}.(field{k})';
+            if spFieldL(k)
+                % Whatever it is, put it in a cell.
+                fieldJK = {modelCell{j}.(field{k})};
+                modelCom.(field{k}) = [modelCom.(field{k}); fieldJK];
+            else
+                %check sizes
+                if size(modelCell{j}.(field{k}),1) ~= sizeCk
+                    if size(modelCell{j}.(field{k}),2) == sizeCk
+                        fieldJK = modelCell{j}.(field{k})';
+                    else
+                        error('Dimension of modelCell{%d}.%s (%d,%d) does not match %s (%d).',...
+                            j,field{k},size(modelCell{j}.(field{k})),str,sizeCk)
+                    end
                 else
-                    error('Dimension of modelCell{%d}.%s (%d,%d) does not match %s (%d).',...
-                        j,field{k},size(modelCell{j}.(field{k})),str,sizeCk)
+                    fieldJK = modelCell{j}.(field{k});
                 end
-            else
-                fieldJK = modelCell{j}.(field{k});
-            end
-            %assignment
-            if isempty(modelCom.(field{k}))
-                modelCom.(field{k}) = fieldJK;
-            else
-                modelCom.(field{k}) = [modelCom.(field{k});fieldJK];
+                %assignment
+                if isempty(modelCom.(field{k}))
+                    modelCom.(field{k}) = fieldJK;
+                else
+                    modelCom.(field{k}) = [modelCom.(field{k});fieldJK];
+                end
             end
         else
-            if isempty(modelCom.(field{k}))
-                if fieldNumeric(k)
-                    modelCom.(field{k}) = zeros(sizeCk,1);
-                elseif fieldCell(k)
-                    modelCom.(field{k}) = repmat({''},sizeCk,1);
-                elseif fieldStruct(k)
-                    modelCom.(field{k}) = repmat(struct(),sizeCk,1);
-                end
+            if spFieldL(k) && isempty(modelCom.(field{k}))
+                modelCom.(field{k}) = {[]};
+            elseif spFieldL(k) && ~isempty(modelCom.(field{k}))
+                modelCom.(field{k})(end + 1, 1) = {[]};
             else
-                if fieldNumeric(k)
-                    modelCom.(field{k})(end+1:end+sizeCk,:) = 0;
-                elseif fieldCell(k)
-                    modelCom.(field{k})(end+1:end+sizeCk,:) = {''};
-                elseif fieldStruct(k)
-                    f = fieldnames(modelCom.(field{k})(end));
-                    modelCom.(field{k})(end+1:end+sizeCk,:) = ...
-                        repmat(cell2struct(repmat({[]},numel(f),1),f),sizeCk,1);
+                if isempty(modelCom.(field{k}))
+                    if fieldNumeric(k)
+                        modelCom.(field{k}) = zeros(sizeCk,1);
+                    elseif fieldCell(k)
+                        modelCom.(field{k}) = repmat({''},sizeCk,1);
+                    elseif fieldStruct(k)
+                        modelCom.(field{k}) = repmat(struct(),sizeCk,1);
+                    end
+                else
+                    if fieldNumeric(k)
+                        modelCom.(field{k})(end+1:end+sizeCk,:) = 0;
+                    elseif fieldCell(k)
+                        modelCom.(field{k})(end+1:end+sizeCk,:) = {''};
+                    elseif fieldStruct(k)
+                        f = fieldnames(modelCom.(field{k})(end));
+                        modelCom.(field{k})(end+1:end+sizeCk,:) = ...
+                            repmat(cell2struct(repmat({[]},numel(f),1),f),sizeCk,1);
+                    end
                 end
             end
         end
@@ -327,7 +328,9 @@ for j = 1:nSp
     metSps = [metSps; j * ones(rowJ,1)];
     %biomass rxn ID
     spBmId(j) = col + spBm(j);
-    spATPM(j) = col + spATPM(j);
+    if ~isempty(spATPM)
+        spATPM(j) = col + spATPM(j);
+    end
     %size of the network
     row = row + rowJ;
     col = col + colJ;
@@ -345,53 +348,60 @@ for kSp = 1:nSp
     [r0,c0,e0] = find(modelCell{kSp}.S);
     modelCell{kSp}.metComs(cellfun(@isempty,modelCell{kSp}.metComs)) = {''};
     [yn,id] = ismember(modelCell{kSp}.metComs,metsCom);
-    rowS = [rowS; id(yn)];
-    colS = [colS; rxnEx2met{kSp}(yn,1)];
-    [yn2,id2] = ismember([find(yn),rxnEx2met{kSp}(yn,2)],[r0,c0],'rows');
+    % in case some extracellular metabolites do not have exchange
+    % reactions. Then organism-community exchange reactions are not added.
+    ynCom = yn & rxnEx2met{kSp}(:, 2) > 0;
+    rowS = [rowS; id(ynCom)];
+    colS = [colS; rxnEx2met{kSp}(ynCom,1)];
+    [yn2,id2] = ismember([find(ynCom),rxnEx2met{kSp}(ynCom,2)],[r0,c0],'rows');
     entryS = [entryS; -e0(id2)];
     EXsp(id(yn),kSp) = rxnEx2met{kSp}(yn,1);
     Msp(id(yn),kSp) = find(metSps == kSp, 1) - 1 + find(yn);
 end
-%community uptake/export reactions
-rowS = [rowS; repmat((1:numel(metsCom))',2,1)];
-colS = [colS; ((col + 1):(col + 2*numel(metsCom)))'];
-entryS = [entryS; ones(numel(metsCom),1); -ones(numel(metsCom),1)];
-SmetCom = sparse(rowS,colS,entryS,numel(metsCom),col+2*numel(metsCom));
-% %new submatrix for balancing community metabolites
-% SmetCom = sparse(numel(metsCom), col + 2 * numel(metsCom));
-% for j = 1:numel(metsCom)
-%     for kSp = 1:nSp
-%         %for each community metabolite, for each species, find the row of
-%         %the corresponding extracellular metabolite
-%         metJK = find(strcmp(modelCell{kSp}.metComs, metsCom{j}),1);
-%         if ~isempty(metJK) %if it is found
-%             %update the stoichiometric matrix
-%             SmetCom(j, rxnEx2met{kSp}(metJK, 1)) = - modelCell{kSp}.S(metJK, rxnEx2met{kSp}(metJK, 2));
-%             EXsp(j, kSp) = rxnEx2met{kSp}(metJK, 1);
-%         end
-%     end
-%     %add two reactions for uptake of and export from the community.
-%     SmetCom(j, [col + j, col + numel(metsCom) + j]) = [1 -1];
-% end
-
-S = [S sparse([],[],[], row, 2*numel(metsCom)); SmetCom];
-b = [b; zeros(numel(metsCom),1)];
-%For non-limiting substrate for uptake, if the lower bound for uptake is high (say
-% 1000), then the upper bound of the corresponding export reaction of the 
-% community metabolites should be significantly larger (say 10000) in order
-% not to overconstrain the community in the way that it is not allowed to 
-% produce those metabolites
-ub = [ub; zeros(numel(metsCom), 1); 10000 * ones(numel(metsCom),1)];
-lb = [lb; zeros(2*numel(metsCom),1)];
-c = [c;  zeros(2*numel(metsCom),1)];
-rev = [rev;  zeros(2*numel(metsCom),1)];
-rxnSps = [rxnSps; zeros(2*numel(metsCom),1)];
-metSps = [metSps; zeros(numel(metsCom),1)];
-
+% community exchange reactions are NOT added for extracellular metabolites
+% without any exchange reactions in any organisms
+wtExCom = any(EXsp, 2);
+mCom = sum(wtExCom);
+[~, rowS] = ismember(rowS, find(wtExCom)); 
+if sepUtEx
+    %community uptake/export reactions
+    rowS = [rowS; repmat((1:mCom)',2,1)];
+    colS = [colS; ((col + 1):(col + 2 * mCom))'];
+    entryS = [entryS; ones(mCom, 1); -ones(mCom, 1)];
+    SmetCom = sparse(rowS, colS, entryS, mCom, col + 2 * mCom);
+    S = [S sparse([],[],[], row, 2 * mCom); SmetCom];
+    % default no uptake
+    %For non-limiting substrate for uptake, if the lower bound for uptake is high (say
+    % 1000), then the upper bound of the corresponding export reaction of the
+    % community metabolites should be significantly larger (say 10000) in order
+    % not to overconstrain the community in the way that it is not allowed to
+    % produce those metabolites
+    ub = [ub; zeros(mCom, 1); 10000 * ones(mCom, 1)];
+    lb = [lb; zeros(2 * mCom, 1)];
+    c = [c;  zeros(2 * mCom, 1)];
+    rev = [rev;  zeros(2 * mCom, 1)];
+    rxnSps = [rxnSps; zeros(2 * mCom, 1)];
+    %names of community exchange reactions
+    rxns = [rxns; strcat('UT_',metsCom(wtExCom),'(u)'); strcat('EX_',metsCom(wtExCom),'(u)')];
+else
+    rowS = [rowS; (1:mCom)'];
+    colS = [colS; ((col + 1):(col + mCom))'];
+    entryS = [entryS; -ones(mCom, 1)];
+    SmetCom = sparse(rowS, colS, entryS, mCom, col + mCom);
+    S = [S sparse([],[],[], row, mCom); SmetCom];
+    ub = [ub; 1000 * ones(mCom, 1)];
+    % default no uptake
+    lb = [lb; zeros(mCom, 1)];
+    c = [c;  zeros(mCom, 1)];
+    rev = [rev;  ones(mCom, 1)];
+    rxnSps = [rxnSps; zeros(mCom, 1)];
+    %names of community exchange reactions
+    rxns = [rxns; strcat('EX_',metsCom(wtExCom),'(u)')];
+end
+b = [b; zeros(mCom, 1)];
+metSps = [metSps; zeros(mCom, 1)];
 %names of community metabolites
-mets = [mets; strcat(metsCom,'[u]')];
-%names of community exchange reactions
-rxns = [rxns; strcat('UT_',metsCom,'(u)'); strcat('EX_',metsCom,'(u)')];
+mets = [mets; strcat(metsCom(wtExCom),'[u]')];
 
 [modelCom.rxns, modelCom.mets, modelCom.S, modelCom.c, modelCom.lb, ...
     modelCom.ub, modelCom.b, modelCom.rev] =...
@@ -400,15 +410,19 @@ rxns = [rxns; strcat('UT_',metsCom,'(u)'); strcat('EX_',metsCom,'(u)')];
 indCom = struct();
 
 rxnSD = sum(modelCom.S ~= 0, 1) <= 1;
-rxnSD((col + 1) : (col + 2*numel(metsCom))) = false;
+rxnSD((col + 1) : (col + end)) = false;
 rxnSD = find(rxnSD);
 %reaction Ids for [uptake | export] of community metabolites
-EXcom = [(col + 1: col + numel(metsCom))' ...
-                    (col + numel(metsCom) + 1: col + 2 * numel(metsCom))'];
+if sepUtEx
+    EXcom = [((col + 1): (col + mCom))', ((col + mCom + 1): (col + 2 * mCom))'];
+else
+    EXcom = (col + 1: col + mCom)';
+end
+EXsp = EXsp(wtExCom, :);
 [indCom.spBm, indCom.spATPM, indCom.rxnSD, indCom.EXcom, indCom.EXsp,...
     indCom.Mcom, indCom.Msp, indCom.rxnSps, indCom.metSps] = deal(...
     spBmId, spATPM, rxnSD, EXcom, EXsp, ...
-    ((row + 1) : (row + numel(metsCom)))', Msp, rxnSps, metSps);
+    ((row + 1) : (row + mCom))', Msp(wtExCom, :), rxnSps, metSps);
 
 
 %add rxnNames if exist                
@@ -416,9 +430,13 @@ if ~isfield(modelCom, 'rxnNames')
     modelCom.rxnNames = modelCom.rxns;
 else
     if numel(modelCom.rxnNames) ~= col
-        modelCom.rxnNames(col + 1: col + 2*numel(metsCom)) = modelCom.rxns(col + 1: col + numel(metsCom)*2);
+        if sepUtEx
+            modelCom.rxnNames((col + 1): (col + 2 * mCom)) = modelCom.rxns((col + 1): (col + 2 * mCom));
+        else
+            modelCom.rxnNames((col + 1): (col + mCom)) = modelCom.rxns((col + 1): (col + mCom));
+        end
     else
-        for j = 1:numel(metsCom)
+        for j = 1:mCom
             rxnNameLength = zeros(nSp, 1);
             for k = 1:nSp
                 if EXsp(j,k) > 0
@@ -426,35 +444,49 @@ else
                 end
             end
             [maxLength, maxLengthId] = max(rxnNameLength);
-            if maxLength > 0
-                rxnNameJ = modelCom.rxnNames{EXsp(j,maxLengthId)};
-                if ~isempty(strfind(rxnNameJ, 'exchange'))
-                    rxnNameJut = strrep(rxnNameJ, 'exchange', '(community uptake)');
-                    rxnNameJex = strrep(rxnNameJ, 'exchange', '(community export)');
+            if sepUtEx
+                if maxLength > 0
+                    rxnNameJ = modelCom.rxnNames{EXsp(j,maxLengthId)};
+                    if ~isempty(strfind(rxnNameJ, 'exchange'))
+                        rxnNameJut = strrep(rxnNameJ, 'exchange', '(community uptake)');
+                        rxnNameJex = strrep(rxnNameJ, 'exchange', '(community export)');
+                    else
+                        rxnNameJut = strcat(rxnNameJ, ' (community uptake)');
+                        rxnNameJex = strcat(rxnNameJ, ' (community export)');
+                    end
+                    modelCom.rxnNames{col + j} = rxnNameJut;
+                    modelCom.rxnNames{col + mCom + j} = rxnNameJex;
                 else
-                    rxnNameJut = strcat(rxnNameJ, ' (community uptake)');
-                    rxnNameJex = strcat(rxnNameJ, ' (community export)');
+                    modelCom.rxnNames{col + j} = modelCom.rxns{col + j};
+                    modelCom.rxnNames{col + mCom + j} = modelCom.rxns{col + mCom + j};
                 end
-                modelCom.rxnNames{col + j} = rxnNameJut;
-                modelCom.rxnNames{col + numel(metsCom) + j} = rxnNameJex;
             else
-                modelCom.rxnNames{col + j} = modelCom.rxns{col + j};
-                modelCom.rxnNames{col + numel(metsCom) + j} = modelCom.rxns{col + numel(metsCom) + j};
+                if maxLength > 0
+                    rxnNameJ = modelCom.rxnNames{EXsp(j,maxLengthId)};
+                    if ~isempty(strfind(rxnNameJ, 'exchange'))
+                        rxnNameJex = strrep(rxnNameJ, 'exchange', '(community export)');
+                    else
+                        rxnNameJex = strcat(rxnNameJ, ' (community export)');
+                    end
+                    modelCom.rxnNames{col + j} = rxnNameJex;
+                else
+                    modelCom.rxnNames{col + j} = modelCom.rxns{col + j};
+                end
             end
         end
     end
 end
 %add metNames, metFormulas and other metField if exist
 if ~isfield(modelCom, 'metFormulas')
-    modelCom.metFormulas = repmat({''}, row + numel(metsCom), 1);
+    modelCom.metFormulas = repmat({''}, row + mCom, 1);
 end
 if ~isfield(modelCom, 'metNames')
     modelCom.metNames = modelCom.mets;
 else
     if numel(modelCom.metNames) ~= row
-        modelCom.metNames(row + 1: row + numel(metsCom)) = modelCom.mets(row + 1: row + numel(metsCom));
+        modelCom.metNames((row + 1): (row + mCom)) = modelCom.mets((row + 1): (row + mCom));
     else
-        for j = 1:numel(metsCom)
+        for j = 1:mCom
 %             metNameLength = zeros(nSp, 1);
             metNameId = zeros(nSp, 1);
             metNameJ = {};
@@ -522,20 +554,29 @@ else
     end
 end
 if isfield(modelCom,'subSystems')
-    modelCom.subSystems(col + 1: col + numel(metsCom)*2) = repmat({'community exchange'},2*numel(metsCom),1);
+    if sepUtEx
+        modelCom.subSystems((col + 1): (col + mCom * 2)) = repmat({'community exchange'}, 2 * mCom, 1);
+    else
+        modelCom.subSystems((col + 1): (col + mCom)) = repmat({'community exchange'}, mCom, 1);
+    end
 end
 %extend all other fields
-uMet = zeros(numel(metsCom),1);
-for jM = 1:numel(metsCom)
-    uMet(jM) = Msp(jM,find(Msp(jM,:),1));
+uMet = zeros(mCom,1);
+Msp = Msp(wtExCom, :);
+for jM = 1:mCom
+    uMet(jM) = Msp(jM, find(Msp(jM, :), 1));
 end
 for j = 1:numel(field)
     if metFieldL(j) || rxnFieldL(j)
-        if metFieldL(j) && ~any(strcmp({'metNames','metFormulas'},field{j}))
-            v = row + 1: row + numel(metsCom);
-            modelCom.(field{j})(v,:) = modelCom.(field{j})(uMet,:);
-        elseif rxnFieldL(j) && ~any(strcmp({'subSystems','rxnNames'},field{j}))
-            v = col + 1: col + numel(metsCom)*2;
+        if metFieldL(j) && ~any(strcmp({'metNames', 'metFormulas'}, field{j}))
+            v = (row + 1): (row + mCom);
+            modelCom.(field{j})(v, :) = modelCom.(field{j})(uMet, :);
+        elseif rxnFieldL(j) && ~any(strcmp({'subSystems', 'rxnNames'}, field{j}))
+            if sepUtEx
+                v = (col + 1): (col + mCom * 2);
+            else
+                v = (col + 1): (col + mCom);
+            end
             if fieldNumeric(j)
                 u = 0;
             elseif fieldCell(j)
@@ -544,18 +585,18 @@ for j = 1:numel(field)
                 f = fieldnames(modelCom.(field{j}));
                 u = cell2struct(repmat({[]},numel(f),1),f);
             end
-            modelCom.(field{j})(v,:) = u;
+            modelCom.(field{j})(v, :) = u;
         end
     end
 end
-%get community info
-infoCom = infoCom2indCom(modelCom,indCom,true,spAbbr,spName);
-
-%special care for genes and rxnGeneMat
+%special care for genes, rxnGeneMat, grRules and rules
 [rGMrow,rGMcol,rGMent] = deal([]);
 rGMm = 0;
 rGMn = 0;
 genes = {};
+nGene = 0;
+indCom.geneSps = [];
+[modelCom.grRules, modelCom.rules] = deal(repmat({''}, numel(modelCom.rxns), 1));
 for jSp = 1:nSp
     if ~isfield(modelCell{jSp},'genes')
         modelCell{jSp}.genes = {};
@@ -573,16 +614,50 @@ for jSp = 1:nSp
         warning('#%d (%s): No. of columns in rxnGeneMat not equal to the number of genes.',jSp,modelCom.sps{jSp});
         modelCell{jSp}.rxnGeneMat(:,end+1:numel(modelCell{jSp}.genes)) = 0;
     end
-    genes = [genes; modelCell{jSp}.genes(:)];
+
+    for field = {'grRules', 'rules'}
+        if ~isfield(modelCell{jSp}, field{:})
+            modelCell{jSp}.(field{:}) = repmat({''}, numel(modelCell{jSp}.rxns), 1);
+        end
+    end
+    % add organism's tag to genes
+    rxn1Sp = find(indCom.rxnSps == jSp, 1) - 1;
+    genes = [genes; strcat(modelCell{jSp}.genes(:), '_', spAbbr{jSp})];
+    grRules = modelCell{jSp}.grRules;
+    % make sure it is a cell array of strings
+    grRules(cellfun(@isempty, grRules)) = {''};
+    grRules = strrep(strrep(grRules, ' and ', ' & '), ' or ', ' | ');
+    grRules = regexprep(grRules, '([^\(\)\s\&\|]+)', ['$1_', spAbbr{jSp}]);
+    modelCom.grRules((rxn1Sp + 1):(rxn1Sp + sum(indCom.rxnSps == jSp))) = grRules;
+    indCom.geneSps = [indCom.geneSps; jSp * ones(numel(modelCell{jSp}.genes), 1)];
+    rules = modelCell{jSp}.rules;
+    gene1Sp = find(indCom.geneSps == jSp, 1) - 1;
+    for j = 1:numel(rules)
+        if ~isempty(rules{j})
+            pos1 = regexp(rules{j}, 'x\((\d+)\)', 'start') + 2;
+            pos2 = regexp(rules{j}, 'x\((\d+)\)', 'end') - 1;
+            ruleJ = rules{j}(1:(pos1(1) - 1));
+            for k = 1 : (numel(pos1) - 1)
+                ruleJ = [ruleJ, num2str(str2double(rules{j}(pos1(k):pos2(k))) + gene1Sp), ...
+                    rules{j}((pos2(k) + 1):(pos1(k + 1) - 1))];
+            end
+            ruleJ = [ruleJ, num2str(str2double(rules{j}(pos1(end):pos2(end))) + gene1Sp), rules{j}((pos2(end) + 1):end)];
+            rules{j} = ruleJ;
+        end
+    end
+    modelCom.rules((rxn1Sp + 1):(rxn1Sp + sum(indCom.rxnSps == jSp))) = rules;
+        
     [rGMrowJ,rGMcolJ,rGMentJ] = find(modelCell{jSp}.rxnGeneMat);
     rGMrow = [rGMrow; (rGMrowJ+rGMm)];
     rGMcol = [rGMcol; (rGMcolJ+rGMn)];
     rGMent = [rGMent; rGMentJ];
-    rGMm = rGMm + size(modelCell{jSp}.rxnGeneMat,1);
-    rGMn = rGMn + size(modelCell{jSp}.rxnGeneMat,2);
+    rGMm = rGMm + size(modelCell{jSp}.rxnGeneMat, 1);
+    rGMn = rGMn + size(modelCell{jSp}.rxnGeneMat, 2);
 end
 modelCom.genes = genes;
-modelCom.rxnGeneMat = sparse(rGMrow,rGMcol,rGMent,size(modelCom.S,2),rGMn);
+modelCom.rxnGeneMat = sparse(rGMrow, rGMcol, rGMent, size(modelCom.S, 2), rGMn);
+%get community info
+infoCom = infoCom2indCom(modelCom,indCom,true,spAbbr,spName);
 % add infoCom and indCom into modelCom
 modelCom.infoCom = infoCom;
 modelCom.indCom = indCom;

@@ -1,4 +1,4 @@
-function [modelCom,infoCom,indCom] = createCommModel(modelCell, options)
+function [modelCom,infoCom,indCom, msg] = createCommModel(modelCell, options)
 %Create a community COBRA model. The model has an extra compartment [u] 
 %for inter-organism and community exchange, i.e.,
 % (environment) <=> [u] <=> [e_organism1]
@@ -22,7 +22,12 @@ function [modelCom,infoCom,indCom] = createCommModel(modelCell, options)
 %     spName:   Full names of the species
 %     spATPM:   Cell array of reaction names of the ATP maintenance reaction in
 %               each model in 'modelCell'
-%    ('sp' originally for 'species')
+%     ('sp' originally for 'species')
+%     sepUtEx:  true to have separate uptake and export reactions for community exchange
+%               false to have one single exchange reaction for each community metabolite (default true)
+%     addExRxns: Add exchange reactions for extracellular metabolites having 
+%                no exchange reactions in the model. Otherwise those
+%                metabolites will not be connected to the community space (default true)
 %     metExId:  Identifier for extracellular metabolites metabolites (default '[e]')
 %               If input is the empty string (''), find all metabolites that have exchange reactions
 %     rxnField: Cell array of field names in the models that have the same
@@ -30,6 +35,7 @@ function [modelCom,infoCom,indCom] = createCommModel(modelCell, options)
 %               with 'rxn' and include 'grRules', 'rules', 'confidenceScores', 'subSystems'
 %     metField: Cell array of field names in the models that have the same
 %               size as mets. Default to include all fields starting with 'met'
+%     verbFlag: true to print messages and warnings (default true)
 %
 %OUTPUT
 % modelCom:     COBRA community model with the following extra fields
@@ -45,9 +51,9 @@ function [modelCom,infoCom,indCom] = createCommModel(modelCell, options)
 %   Mcom:          community metabolites
 %   Msp:           Msp{i,k} the extracellular met of organism k
 %                  corresponding to community metabolite Mcom{i}
-%   spAbbr:   species abbreviation, used in mets and rxns                       
+%   spAbbr:        species abbreviation, used in mets and rxns                       
 %                  to identify species-specific metabolites                          
-%   spName:   full name of each species        
+%   spName:        full name of each species        
 %   rxnSps:        rxnSps{j} is the abbreviation of species k (spAbbr{k}) 
 %                  if reaction j is of species k. 'com' for community exchange reactions    
 %   metSps:        metSps{i} is the abbreviation of species k (spAbbr{k}) 
@@ -64,15 +70,15 @@ function [modelCom,infoCom,indCom] = createCommModel(modelCell, options)
 %                  species info.spName{k}. 0 for community exchange reactions    
 %   metSps:        index.metSps(i) = k implies that metabolite i is of                    
 %                  species info.spName{k}. 0 for community metabolites             
-
+% msg:          Messages printed during the model compilation
 
 %% arguement checking
 if ~exist('options', 'var')
     options = struct();
 end
 %get parameters
-[spAbbr,spName,spBm,spATPM,metExId,rxnField,metField,sepUtEx] = getCobraComParams(...
-    {'spAbbr','spName','spBm','spATPM','metExId','rxnField','metField','sepUtEx'}, options);
+[spAbbr,spName,spBm,spATPM,metExId,rxnField,metField,sepUtEx,addExRxns,verbFlag] = getCobraComParams(...
+    {'spAbbr','spName','spBm','spATPM','metExId','rxnField','metField','sepUtEx','addExRxns','verbFlag'}, options);
 %organisms' abbreviations and names
 nameSpecies = false;
 if isstruct(modelCell)
@@ -93,7 +99,6 @@ if isempty(spName)
     spName = spAbbr;
 end
 %biomass reactions
-findspBm = false;
 if isempty(spBm)
     error('Please provide the names of the biomass reactions in options.spBm'); 
 elseif numel(spBm) ~= nSp
@@ -113,6 +118,13 @@ if iscell(spATPM)
         spATPM(j) = findRxnIDs(modelCell{j}, spATPM0{j});
     end
 end
+if isempty(addExRxns)
+    addExRxns = true;
+end
+if isempty(sepUtEx)
+    sepUtEx = true;
+end
+msg = '';
 %% Copy fields from COBRA model
 field = {};
 [fieldNumeric, fieldCell, fieldStruct]  = deal(false(0));
@@ -184,43 +196,65 @@ row = 0;
 col = 0;
 for j = 1:nSp
     [rowJ, colJ] = size(modelCell{j}.S);
-    %get bounds and objective
-    lbJ = modelCell{j}.lb;
-    ubJ = modelCell{j}.ub;
-    cJ = modelCell{j}.c;
+    modelMsg = printCurrentModel(j, spAbbr, spName);
     if isfield(modelCell{j}, 'metComs') %given the mapping to community metabolites
         if numel(modelCell{j}.metComs) < numel(modelCell{j}.mets)
-            warning('input model %d: size of metComs < size of mets.');
+            msg = warnAndRecordMsg(msg, sprintf('%s: size of metComs < size of mets.', modelMsg), verbFlag);
             modelCell{j}.metComs(end+1:numel(modelCell{j}.mets)) = {''};
         elseif numel(modelCell{j}.metComs) > numel(modelCell{j}.mets)
-            warning('input model %d: size of metComs > size of mets.');
+            msg = warnAndRecordMsg(msg, sprintf('%s: size of metComs > size of mets.', modelMsg), verbFlag);
             modelCell{j}.metComs(numel(modelCell{j}.mets)+1:end) = [];
         end
         %logical vector for extracellular metabolites
         ex{j} = ~cellfun(@isempty, modelCell{j}.metComs);
         modelCell{j}.metComs(ex{j}) = regexprep(modelCell{j}.metComs(ex{j}),'\[[^\[\]]*\]$','');
-        %logical vector for exchange reactions
-        rxnEx{j} = (sum(modelCell{j}.S(ex{j},:) ~= 0) == 1)' ...
-                & (sum(modelCell{j}.S(~ex{j},:) ~= 0) == 0)';
-        rxnEx2met{j} = zeros(rowJ,2);
-    elseif ~isempty(metExId) %using identifier for extracellular mets
-        %logical vector for extracellular metabolites
-        ex{j} = cellfun(@(x) ~isempty(strfind(x, metExId)), ...
-            modelCell{j}.mets);
-        modelCell{j}.metComs = repmat({''},rowJ,1);
-        modelCell{j}.metComs(ex{j}) = regexprep(modelCell{j}.mets(ex{j}),'\[[^\[\]]*\]$','');
-        %logical vector for exchange reactions
-        rxnEx{j} = (sum(modelCell{j}.S(ex{j},:) ~= 0) == 1)' ...
-                & (sum(modelCell{j}.S(~ex{j},:) ~= 0) == 0)';
-        %exchange reactions mapped to metabolites
-        rxnEx2met{j} = zeros(rowJ,2);
-    else %if no identifier, just check exchange reactions
-        rxnEx{j} = (sum(modelCell{j}.S ~= 0) == 1)';
-        rxnEx2met{j} = zeros(rowJ,2);
-        ex{j} = any(modelCell{j}.S(:,rxnEx{j}),2);
+    else
+        if ~isempty(metExId) %using identifier for extracellular mets
+            %logical vector for extracellular metabolites
+            ex{j} = cellfun(@(x) ~isempty(strfind(x, metExId)), modelCell{j}.mets);
+        else %if no identifier, just check exchange reactions (will include sink/demand reactions)
+            ex{j} = any(modelCell{j}.S(:, sum(modelCell{j}.S ~= 0) == 1), 2);
+        end
         modelCell{j}.metComs = repmat({''},rowJ,1);
         modelCell{j}.metComs(ex{j}) = regexprep(modelCell{j}.mets(ex{j}),'\[[^\[\]]*\]$','');
     end
+    %logical vector for exchange reactions
+    rxnEx{j} = (sum(modelCell{j}.S(ex{j},:) ~= 0) == 1)' & (sum(modelCell{j}.S(~ex{j},:) ~= 0) == 0)';
+    if addExRxns
+        % add exchange reactions for those mets in ex{j} having no exchange rxns in rxnEx{j}
+        metExWoER = find(ex{j} & ~any(modelCell{j}.S(:, rxnEx{j}), 2));
+        if ~isempty(metExWoER)
+            msg = printAndRecordMsg(msg, sprintf('%s:\n', modelMsg), verbFlag);
+            for mJ = 1:numel(metExWoER)
+                rxn = ['EX_' regexprep(modelCell{j}.mets{metExWoER(mJ)}, '\[(.*)\]', '\($1\)')];
+                modelCell{j} = addReaction(modelCell{j}, rxn, ...
+                    'reactionName', ['Exchange reaction for ' modelCell{j}.metNames{metExWoER(mJ)}], ...
+                    'reactionFormula', [modelCell{j}.mets{metExWoER(mJ)}, ' <=>'], ...
+                    'printLevel', 0);
+                msg = printAndRecordMsg(msg, sprintf('\tExchang reaction added for %s, %s: %s\n', ...
+                    modelCell{j}.mets{metExWoER(mJ)}, rxn, [modelCell{j}.mets{metExWoER(mJ)}, ' <=>']), verbFlag);
+            end
+            % redefine the number of reactions and exchange reaction indices
+            colJ = colJ + numel(metExWoER);
+            rxnEx{j} = (sum(modelCell{j}.S(ex{j},:) ~= 0) == 1)' & (sum(modelCell{j}.S(~ex{j},:) ~= 0) == 0)';
+            % update rxn fields
+            for jF = 1:numel(field)
+                if rxnFieldL(jF) && size(modelCell{j}.(field{jF}), 1) < colJ
+                    if isnumeric(modelCell{j}.(field{jF}))
+                        modelCell{j}.(field{jF})((end + 1):colJ, :) = 0;
+                    else
+                        modelCell{j}.(field{jF})((end + 1):colJ, :) = {''};
+                    end
+                end
+            end
+        end
+    end
+    %get bounds and objective
+    lbJ = modelCell{j}.lb;
+    ubJ = modelCell{j}.ub;
+    cJ = modelCell{j}.c;
+    %indices for exchange reactions mapped to metabolites
+    rxnEx2met{j} = zeros(rowJ,2);
     for k = 1:colJ
         if rxnEx{j}(k)
             metJK = find(modelCell{j}.S(:, k), 1);
@@ -357,6 +391,16 @@ for kSp = 1:nSp
     entryS = [entryS; -e0(id2)];
     EXsp(id(yn),kSp) = rxnEx2met{kSp}(yn,1);
     Msp(id(yn),kSp) = find(metSps == kSp, 1) - 1 + find(yn);
+    metNotAdded = find(yn & ~ynCom);
+    if ~isempty(metNotAdded)
+        modelMsg = printCurrentModel(kSp, spAbbr, spName);
+        msg = printAndRecordMsg(msg, sprintf(['%s\n\tThe following mets are not added as community mets', ...
+            'because there are no exchange reactions for them in the model:\n'], modelMsg), verbFlag);
+        for mK = 1:numel(metNotAdded)
+            msg = printAndRecordMsg(msg, sprintf('\t%s\t%s\n', modelCell{kSp}.mets{metNotAdded(mK)}, ...
+                modelCell{kSp}.metComs{metNotAdded(mK)}), verbFlag);
+        end
+    end
 end
 % community exchange reactions are NOT added for extracellular metabolites
 % without any exchange reactions in any organisms
@@ -598,6 +642,7 @@ nGene = 0;
 indCom.geneSps = [];
 [modelCom.grRules, modelCom.rules] = deal(repmat({''}, numel(modelCom.rxns), 1));
 for jSp = 1:nSp
+    modelMsg = printCurrentModel(jSp, spAbbr, spName);
     if ~isfield(modelCell{jSp},'genes')
         modelCell{jSp}.genes = {};
     end
@@ -605,13 +650,13 @@ for jSp = 1:nSp
         modelCell{jSp}.rxnGeneMat = sparse(size(modelCell{jSp}.S,2),numel(modelCell{jSp}.genes));
     end
     if size(modelCell{jSp}.rxnGeneMat,1) ~= size(modelCell{jSp}.S,2)
-        warning('#%d (%s): No. of rows in rxnGeneMat not equal to the number of reactions.',jSp,modelCom.sps{jSp});
+        msg = warnAndRecordMsg(msg, sprintf('%s: No. of rows in rxnGeneMat not equal to the number of reactions.', modelMsg), verbFlag);
     end
     if numel(modelCell{jSp}.genes) < size(modelCell{jSp}.rxnGeneMat,2)
-        warning('#%d (%s): No. of columns in rxnGeneMat not equal to the number of genes.',jSp,modelCom.sps{jSp});
+        msg = warnAndRecordMsg(msg, sprintf('%s: No. of columns in rxnGeneMat not equal to the number of genes.', modelMsg), verbFlag);
         modelCell{jSp}.genes(end+1:size(modelCell{jSp}.rxnGeneMat,2)) = {''};
     elseif numel(modelCell{jSp}.genes) > size(modelCell{jSp}.rxnGeneMat,2)
-        warning('#%d (%s): No. of columns in rxnGeneMat not equal to the number of genes.',jSp,modelCom.sps{jSp});
+        msg = warnAndRecordMsg(msg, sprintf('%s: No. of columns in rxnGeneMat not equal to the number of genes.', modelMsg), verbFlag);
         modelCell{jSp}.rxnGeneMat(:,end+1:numel(modelCell{jSp}.genes)) = 0;
     end
 
@@ -662,5 +707,22 @@ infoCom = infoCom2indCom(modelCom,indCom,true,spAbbr,spName);
 modelCom.infoCom = infoCom;
 modelCom.indCom = indCom;
 end
-    
+
+function str = printCurrentModel(kSp, spAbbr, spName)
+str = sprintf('Input model %d %s', kSp, spAbbr{kSp});
+if ~strcmp(spName{kSp}, spAbbr{kSp})
+    str = sprintf('%s\t%s', str, spName{kSp});
+end
+end
+
+function msg = printAndRecordMsg(msg, msgCur, verbFlag)
+if verbFlag, fprintf(msgCur); end
+msg = sprintf('%s%s', msg, msgCur);
+end
+
+function msg = warnAndRecordMsg(msg, msgCur, verbFlag)
+if verbFlag, warning(msgCur); end
+msg = sprintf('%s%s', msg, msgCur);
+end
+
 

@@ -1,28 +1,30 @@
 function varargout = checkSolFeas(LP, sol, maxInfeas, tol, internal)
-%Check the feasibility of a solution given a COBRA model structure or a CPLEX dynamic object and a solution
-%infeas = checkSolFeas(LP)
-%   returns the maximum infeasibility 'infeas' of the solution in the Cplex 
-%   object 'LP'. infeas <= 0 means absolutely feasible.
-%infeas = checkSolFeas(LP,[],maxInfeas)
-%   returns the maximum infeasibility (maxInfeas = true, default) 
-%   or a struct of vectors of infeasibility 'infeas' (maxInfeas = false)
-%   of the solution in the Cplex object 'LP' with the fields:
-%   'con' for infeasibility of constraints
-%   'lb'  for infeasibility of lower bounds
-%   'ub'  for infeasibility of upper bounds
-%   'ind' for infeasibility of indicator constraints. = -Inf if an
-%   indicator is not active.
-%infeas = checkSolFeas(LP, sol, maxInfeas)
-%   returns a vector 'infeas' of maximum infeasibility for each solution in each 
-%   column of 'sol' to the LP problem 'LP', which can be a Cplex object, COBRA
-%   model, COBRA LP structure or gurobi LP structure if maxInfeas = true.
-%   If maxInfeas = false, return a structure of matrix of infeasibility 
-%   (e.g. #constraints x #solutions).
-%   'sol' can also be a solution structure resulting from gurobi or solveCobraLP
-%[infeas, sol] = checkSolFeas(LP, sol, maxInfeas, tol)
-%   returns also the solution structure 'sol' if the input 'sol' is a
-%   solution structure, with the field sol.stat = 1 if dev < tol, the
-%   feasibility tolerance. 'tol' is defaulted at 1e-8
+% Returns the infeasibility of solutions given a COBRA model or LP structure, or a IBM-ILOG CPLEX class
+%
+% USAGE:
+%
+%    [infeas, sol] = checkSolFeas(LP, sol, maxInfeas, tol)
+%
+% INPUTS:
+%    LP:           COBRA model or `LP` structure, or a IBM-ILOG CPLEX class
+%    sol:          solution structure or columns of solution vectors. If `LP` is a
+%                  CPLEX class with. Solution property `sol` can be omitted or empty.
+%
+% OPTIONAL INPUTS:
+%    maxInfeas:    if true (defaulted), `infeas` = maximum infeasiblity
+%                  if false, `infeas` = struct of vectors of infeasibility with the following fields:
+%
+%                    * 'con' for infeasibility of constraints
+%                    * 'lb'  for infeasibility of lower bounds
+%                    * 'ub'  for infeasibility of upper bounds
+%                    * 'ind' for infeasibility of indicator constraints. = -Inf if an indicator is not active. (CPLEX class only)
+%    tol:          feasibility tolerance (defaulted at the Cobra solver `feasTol` value).
+%                  For determining if the input solution is indeed feasible. Used only if the input solution is a structure.
+%
+% OUTPUT:
+%    infeas:       maximum infeasibility (`maxInfeas = true`) or struct of vectors of infeasibility (`maxInfeas = false`)
+%    sol:          solution structure. Only available if the input solution is a structure.
+%                  If :math:`infeas \leq tol`, `sol.stat = 1`. Otherwise no change.
 
 if nargin < 3 || isempty(maxInfeas)
     maxInfeas = true;
@@ -40,8 +42,8 @@ if ~internal
     [varInd, compleInd, rhsInd, conInd, csInd] = deal([]);
 end
 if ~isa(LP, 'Cplex')
-    %For COBRA or similar LP problem
-    %check field in LP
+    % for COBRA or similar LP problem
+    % check field in LP
     if isfield(LP, 'b')
         b0 = LP.b;
     elseif isfield(LP, 'rhs')
@@ -50,7 +52,7 @@ if ~isa(LP, 'Cplex')
         varargout = {[]};
         return
     end
-    if isfield(LP,'A') 
+    if isfield(LP,'A')
         A = LP.A; %COBRA LP problem or gurobi LP problem
     elseif isfield(LP,'S')
         A = LP.S; %COBRA model
@@ -58,41 +60,39 @@ if ~isa(LP, 'Cplex')
         varargout = {[]};
         return
     end
+    E = 'E';
+    L = 'L';
+    G = 'G';
     if isfield(LP, 'sense')
-        cs = LP.csense; %gurobi
+        cs = LP.sense; %gurobi
         E = '=';
         L = '<';
         G = '>';
     elseif isfield(LP,'csense')
-        cs = LP.sense; %COBRA
-        E = 'E';
-        L = 'L';
-        G = 'G';
+        cs = LP.csense; %COBRA
     else
         %COBRA model, no csense, assume all equal
         cs = char('E' * ones(size(A,1),1));
-        E = 'E';
-        L = 'L';
-        G = 'G';
     end
    %check field in sol
     if isstruct(sol)
         sol0 = sol;
-        if isfield(sol,'full') 
+        if isfield(sol,'full') && ~isempty(sol.full)
             sol = sol.full;
-        elseif isfield(sol, 'x')
+        elseif isfield(sol, 'x') && ~isempty(sol.full)
             sol = sol.x;
         else
-            varargout = {[]};
+            varargout = {NaN};
             return
         end
-    elseif ismatrix(sol) && size(sol,1) == size(A,2)
-        sol = sol;
+    elseif ismatrix(sol)
+        if size(sol,1) ~= size(A,2)
+            error('Dimension of the input solution not compatible with the model');
+        end
     else
-        varargout = {[]};
-        return
+        error('Unknown format of the input solution');
     end
-    
+
     b = A * sol;
     b0 = b0 * ones(1, size(sol,2));
     if maxInfeas
@@ -125,10 +125,10 @@ if ~isa(LP, 'Cplex')
             infeas.ub = [];
         end
     end
-        
-    if isstruct(sol0)
+
+    if isstruct(sol)
         if nargin < 4
-            tol = 1e-8;
+            tol = getCobraSolverParams('LP', {'feasTol'});
         end
         if infeas < tol
             sol0.stat = 1;
@@ -148,7 +148,7 @@ else
             return
         end
     end
- 
+
     %for checking an array of solutions
     %(Each column in the matrix sol is a solution)
     mSize = 30; %optimized parameter for my computer for models of large size (~1e4)
@@ -164,10 +164,10 @@ else
             rhsInd(j) = LP.Model.indicator(j).rhs;
             csInd(j) = LP.Model.indicator(j).sense;
         end
-        
+
     end
     b = LP.Model.A * sol;
-    
+
     if maxInfeas
         infeas = zeros(1,size(sol, 2));
         if size(sol, 2) > mSize
@@ -181,7 +181,7 @@ else
                 infeas((floor(size(sol, 2) / mSize)*mSize+1):end) = checkSolFeas(LP, ...
                     sol(:,(floor(size(sol, 2) / mSize)*mSize+1):end),maxInfeas,[],true);
             end
-            
+
         else
             infeas = max([infeas; max(repmat(LP.Model.lhs,1,size(b,2)) - b,[],1)],[],1);
             infeas = max([infeas; max(b - repmat(LP.Model.rhs,1,size(b,2)),[],1)],[],1);
@@ -249,4 +249,3 @@ else
 end
 
 end
-

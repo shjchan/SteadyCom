@@ -33,8 +33,12 @@ function [modelCom,infoCom,indCom, msg] = createCommModel(modelCell, options)
 %     rxnField: Cell array of field names in the models that have the same
 %               size as rxns. Default to include all fields starting
 %               with 'rxn' and include 'grRules', 'rules', 'confidenceScores', 'subSystems'
-%     metField: Cell array of field names in the models that have the same
-%               size as mets. Default to include all fields starting with 'met'
+%     metField: Cell array of field names in the models that have the same size as mets.
+%                Default to include all fields starting with 'met' and the field 'csense'
+%     geneField: Cell array of field names in the models that have the same size as genes. 
+%               Default to include all fields starting with 'gene' and the field 'proteins'
+%     compField: Cell array of field names in the models that have the same size as comps (compartments).
+%               Default to include all fields starting with 'comp'
 %     verbFlag: true to print messages and warnings (default true)
 %
 %OUTPUT
@@ -77,8 +81,8 @@ if ~exist('options', 'var')
     options = struct();
 end
 %get parameters
-[spAbbr,spName,spBm,spATPM,metExId,rxnField,metField,sepUtEx,addExRxns,verbFlag] = getCobraComParams(...
-    {'spAbbr','spName','spBm','spATPM','metExId','rxnField','metField','sepUtEx','addExRxns','verbFlag'}, options);
+[spAbbr,spName,spBm,spATPM,metExId,rxnField,metField,geneField,compField,sepUtEx,addExRxns,verbFlag] = getCobraComParams(...
+    {'spAbbr','spName','spBm','spATPM','metExId','rxnField','metField','geneField','compField','sepUtEx','addExRxns','verbFlag'}, options);
 %organisms' abbreviations and names
 nameSpecies = false;
 if isstruct(modelCell)
@@ -141,7 +145,8 @@ end
 [field,id] = unique(field);
 [fieldNumeric,fieldCell,fieldStruct] = deal(fieldNumeric(id),fieldCell(id),fieldStruct(id));
 %fields that need special care
-id = ismember(field, {'S', 'rxns', 'mets', 'rev', 'lb', 'ub', 'c', 'b', 'metComs','rxnGeneMat','genes', 'grRules', 'rules'});
+id = ismember(field, {'S', 'rxns', 'mets', 'rev', 'lb', 'ub', 'c', 'b', ...
+    'metComs','rxnGeneMat','genes', 'grRules', 'rules', 'comps', 'compNames'});
 [field,fieldNumeric,fieldCell,fieldStruct] = deal(field(~id),fieldNumeric(~id),fieldCell(~id),fieldStruct(~id));
 rxnField = unique([rxnField(:);{'confidenceScores';'subSystems'}]);
 
@@ -151,19 +156,9 @@ for j = 1:numel(field)
 end
 
 %% fields to be changed
-S = [];
-rxns = {};
-mets = {};
-metsCom = {};
-rev = [];
-lb = [];
-ub = [];
-c = [];
-b = [];
-%map rxns to species
-rxnSps = [];
-%map mets to species
-metSps = [];
+[S, rxns, mets, metsCom, rev, lb, ub, c, b] = deal([]);
+%map rxns, mets, genes, compartments to species
+[rxnSps, metSps, geneSps, compSps] = deal([]);
 %rxn IDs of biomass
 spBmId = zeros(nSp, 1);
 
@@ -173,6 +168,9 @@ ex = cell(nSp, 1);
 rxnEx = cell(nSp, 1);
 %map ex mets and ex rxns
 rxnEx2met = cell(nSp, 1);
+
+% compartments
+[comps, compNames] = deal({});
 
 %% loop for each species
 if ~isempty(metField)
@@ -185,17 +183,37 @@ if ~isempty(rxnField)
 else
     rxnFieldKnown = false(numel(field),1);
 end
+if ~isempty(geneField)
+    geneFieldKnown = ismember(field, geneField);
+else
+    geneFieldKnown = false(numel(field),1);
+end
+if ~isempty(compField)
+    compFieldKnown = ismember(field, compField);
+else
+    compFieldKnown = false(numel(field),1);
+end
 %met-related fields
-metFieldL = strncmp('met',field,3) | metFieldKnown;
+metFieldL = strncmp('met',field,3) | metFieldKnown | ismember(field, {'csense'});
 %rxn-related fields
 rxnFieldL = strncmp('rxn',field,3) | rxnFieldKnown;
+% gene-related fields
+geneFieldL = strncmp('gene',field,4) | ismember(field, {'proteins'}) | geneFieldKnown;
+% compartment-related fields
+compFieldL = strncmp('comp',field,4) | compFieldKnown;
 %all other fields just put in a cell for each model
-spFieldL = ~metFieldL & ~rxnFieldL;
+spFieldL = ~metFieldL & ~rxnFieldL & ~geneFieldL & ~compFieldL;
+
+msg = printAndRecordMsg(msg, sprintf('Compile metabolites and reactions...\n'), verbFlag);
 
 row = 0;
 col = 0;
 for j = 1:nSp
     [rowJ, colJ] = size(modelCell{j}.S);
+    if ~isfield(modelCell{j},'genes')
+        modelCell{j}.genes = {};
+    end
+    geneJ = numel(modelCell{j}.genes);
     modelMsg = printCurrentModel(j, spAbbr, spName);
     if isfield(modelCell{j}, 'metComs') %given the mapping to community metabolites
         if numel(modelCell{j}.metComs) < numel(modelCell{j}.mets)
@@ -283,14 +301,41 @@ for j = 1:nSp
     c = [c; cJ];
     b = [b; modelCell{j}.b];
     %add species's name to rxns and mets (add to the compartment if exist)
-    if 1
-        metJ = regexprep(modelCell{j}.mets,'\]$',['_' spAbbr{j} '\]']);
-        metJ(cellfun(@(x) ~strcmp(x(end),']'), metJ)) = strcat(metJ(cellfun(@(x) ~strcmp(x(end),']'), metJ)),'[',spAbbr{j},']');
-        mets = [mets; metJ];
-    else
-        mets = [mets; strcat(modelCell{j}.mets,'[',spAbbr{j},']')];
-    end
+    metJ = regexprep(modelCell{j}.mets,'\]$',['_' spAbbr{j} '\]']);
+    metWoComp = cellfun(@(x) ~strcmp(x(end),']'), metJ);
+    metJ(metWoComp) = strcat(metJ(metWoComp), '[', spAbbr{j}, ']');
+    mets = [mets; metJ];
     rxns = [rxns; strcat(modelCell{j}.rxns,'_',spAbbr{j})];
+    
+    % compartments
+    if isfield(modelCell{j}, 'comps')
+        % use the compartment IDs
+        compsJ = modelCell{j}.comps;
+    else
+        % retreive the compartment IDs from .mets if not exist
+        compsJ = regexp(modelCell{j}.mets, '(\[.*\])$','tokens','once');
+        % if there is any met without compartment ID
+        emptyComp = cellfun(@isempty, compsJ);
+        if any(emptyComp)
+            compsJ = compsJ(~emptyComp);
+            emptyComp = true;
+        else
+            emptyComp = false;
+        end
+        compsJ = cellfun(@(x) x{1}, compsJ ,'UniformOutput',false);
+        compsJ = unique(compsJ(:));
+        if emptyComp
+            compsJ{end + 1} = '';
+        end
+    end
+    comps = [comps; strcat(compsJ, '_', spAbbr{j})];
+    if isfield(modelCell{j}, 'compNames')
+        compNames  = [compNames; strcat(modelCell{j}.compNames, '_', spName{j})];
+    else
+        compNames  = [compNames; strcat(compsJ, '_', spName{j})];
+    end
+    nCompJ = numel(compsJ);
+    
     %incorporate other field
     for k = 1:numel(field)
         if metFieldL(k)
@@ -299,6 +344,12 @@ for j = 1:nSp
         elseif rxnFieldL(k)
             str = 'rxns';
             sizeCk = colJ;
+        elseif geneFieldL(k)
+            str = 'genes';
+            sizeCk = geneJ;
+        elseif compFieldL(k)
+            str = 'comps';
+            sizeCk = nCompJ;
         else
             %spField
             str = '1';
@@ -360,6 +411,8 @@ for j = 1:nSp
     %species specific rxns and mets
     rxnSps = [rxnSps; j * ones(colJ,1)];
     metSps = [metSps; j * ones(rowJ,1)];
+    geneSps = [geneSps; j * ones(geneJ, 1)];
+    compSps = [compSps; j * ones(nCompJ, 1)];
     %biomass rxn ID
     spBmId(j) = col + spBm(j);
     if ~isempty(spATPM)
@@ -371,6 +424,7 @@ for j = 1:nSp
 end
 
 %% Community metabolites
+msg = printAndRecordMsg(msg, sprintf('Add community metabolites and exchange reactions...\n'), verbFlag);
 metsCom = sort(unique(metsCom));
 %Ids of exchange reactions corresponding to community metabolites
 % [a_ij] = exchange reaction Id for community metabolite i and species j 
@@ -447,9 +501,13 @@ metSps = [metSps; zeros(mCom, 1)];
 %names of community metabolites
 mets = [mets; strcat(metsCom(wtExCom),'[u]')];
 
+comps = [comps; {'u'}];
+compNames = [compNames; {'Community'}];
+compSps(end + 1) = 0;
+
 [modelCom.rxns, modelCom.mets, modelCom.S, modelCom.c, modelCom.lb, ...
-    modelCom.ub, modelCom.b, modelCom.rev] =...
-    deal(rxns, mets, S, c, lb, ub, b, rev);
+    modelCom.ub, modelCom.b, modelCom.rev, modelCom.comps, modelCom.compNames] =...
+    deal(rxns, mets, S, c, lb, ub, b, rev, comps, compNames);
 %get community reaction indices
 indCom = struct();
 
@@ -464,9 +522,9 @@ else
 end
 EXsp = EXsp(wtExCom, :);
 [indCom.spBm, indCom.spATPM, indCom.rxnSD, indCom.EXcom, indCom.EXsp,...
-    indCom.Mcom, indCom.Msp, indCom.rxnSps, indCom.metSps] = deal(...
-    spBmId, spATPM, rxnSD, EXcom, EXsp, ...
-    ((row + 1) : (row + mCom))', Msp(wtExCom, :), rxnSps, metSps);
+    indCom.Mcom, indCom.Msp, indCom.rxnSps, indCom.metSps, indCom.geneSps, indCom.compSps] ...
+    = deal(spBmId, spATPM, rxnSD, EXcom, EXsp, ...
+    ((row + 1) : (row + mCom))', Msp(wtExCom, :), rxnSps, metSps, geneSps, compSps);
 
 
 %add rxnNames if exist                
@@ -633,79 +691,60 @@ for j = 1:numel(field)
         end
     end
 end
-%special care for genes, rxnGeneMat, grRules and rules
+
+%% special care for genes, rxnGeneMat, grRules and rules
+msg = printAndRecordMsg(msg, sprintf('Merge gene-reaction rules...\n'), verbFlag);
 [rGMrow,rGMcol,rGMent] = deal([]);
 rGMm = 0;
 rGMn = 0;
-genes = {};
-nGene = 0;
-indCom.geneSps = [];
+[genes, grRules] = deal({});
 [modelCom.grRules, modelCom.rules] = deal(repmat({''}, numel(modelCom.rxns), 1));
+modelCom.genes = {};
+for jG = 1:numel(geneField)
+    modelCom.(geneField{jG}) = {};
+end
 for jSp = 1:nSp
     modelMsg = printCurrentModel(jSp, spAbbr, spName);
-    if ~isfield(modelCell{jSp},'genes')
-        modelCell{jSp}.genes = {};
-    end
-    if ~isfield(modelCell{jSp},'rxnGeneMat')
-        modelCell{jSp}.rxnGeneMat = sparse(size(modelCell{jSp}.S,2),numel(modelCell{jSp}.genes));
-    end
-    if size(modelCell{jSp}.rxnGeneMat,1) ~= size(modelCell{jSp}.S,2)
-        msg = warnAndRecordMsg(msg, sprintf('%s: No. of rows in rxnGeneMat not equal to the number of reactions.', modelMsg), verbFlag);
-    end
-    if numel(modelCell{jSp}.genes) < size(modelCell{jSp}.rxnGeneMat,2)
-        msg = warnAndRecordMsg(msg, sprintf('%s: No. of columns in rxnGeneMat not equal to the number of genes.', modelMsg), verbFlag);
-        modelCell{jSp}.genes(end+1:size(modelCell{jSp}.rxnGeneMat,2)) = {''};
-    elseif numel(modelCell{jSp}.genes) > size(modelCell{jSp}.rxnGeneMat,2)
-        msg = warnAndRecordMsg(msg, sprintf('%s: No. of columns in rxnGeneMat not equal to the number of genes.', modelMsg), verbFlag);
-        modelCell{jSp}.rxnGeneMat(:,end+1:numel(modelCell{jSp}.genes)) = 0;
-    end
-
-    for field = {'grRules', 'rules'}
-        if ~isfield(modelCell{jSp}, field{:})
-            modelCell{jSp}.(field{:}) = repmat({''}, numel(modelCell{jSp}.rxns), 1);
+    if ~isfield(modelCell{jSp}, 'rules') 
+        if isfield(modelCell{jSp}, 'grRules')
+            modelCell{jSp} = generateRules(model, 0);
+        else
+            modelCell{jSp}.rules = repmat({''}, numel(modelCell{jSp}.rxns), 1);
         end
     end
-    % add organism's tag to genes
-    rxn1Sp = find(indCom.rxnSps == jSp, 1) - 1;
-    genes = [genes; strcat(modelCell{jSp}.genes(:), '_', spAbbr{jSp})];
-    grRules = modelCell{jSp}.grRules;
-    % make sure it is a cell array of strings
-    grRules(cellfun(@isempty, grRules)) = {''};
-    grRules = strrep(strrep(grRules, ' and ', ' & '), ' or ', ' | ');
-    grRules = regexprep(grRules, '([^\(\)\s\&\|]+)', ['$1_', spAbbr{jSp}]);
-    modelCom.grRules((rxn1Sp + 1):(rxn1Sp + sum(indCom.rxnSps == jSp))) = grRules;
-    indCom.geneSps = [indCom.geneSps; jSp * ones(numel(modelCell{jSp}.genes), 1)];
-    rules = modelCell{jSp}.rules;
-    gene1Sp = find(indCom.geneSps == jSp, 1) - 1;
-    for j = 1:numel(rules)
-        if ~isempty(rules{j})
-            pos1 = regexp(rules{j}, 'x\((\d+)\)', 'start') + 2;
-            pos2 = regexp(rules{j}, 'x\((\d+)\)', 'end') - 1;
-            ruleJ = rules{j}(1:(pos1(1) - 1));
-            for k = 1 : (numel(pos1) - 1)
-                ruleJ = [ruleJ, num2str(str2double(rules{j}(pos1(k):pos2(k))) + gene1Sp), ...
-                    rules{j}((pos2(k) + 1):(pos1(k + 1) - 1))];
-            end
-            ruleJ = [ruleJ, num2str(str2double(rules{j}(pos1(end):pos2(end))) + gene1Sp), rules{j}((pos2(end) + 1):end)];
-            rules{j} = ruleJ;
-        end
-    end
-    modelCom.rules((rxn1Sp + 1):(rxn1Sp + sum(indCom.rxnSps == jSp))) = rules;
-        
-    [rGMrowJ,rGMcolJ,rGMentJ] = find(modelCell{jSp}.rxnGeneMat);
-    rGMrow = [rGMrow; (rGMrowJ+rGMm)];
-    rGMcol = [rGMcol; (rGMcolJ+rGMn)];
-    rGMent = [rGMent; rGMentJ];
-    rGMm = rGMm + size(modelCell{jSp}.rxnGeneMat, 1);
-    rGMn = rGMn + size(modelCell{jSp}.rxnGeneMat, 2);
+    % add organism's tag to genes to ensure unique gene names in the model
+    modelCell{jSp}.genes = strcat(modelCell{jSp}.genes(:), '_', spAbbr{jSp});
+    % update grRules
+    modelCell{jSp} = creategrRulesField(modelCell{jSp});
+    
+    genes = [genes; modelCell{jSp}.genes];
+    grRules = [grRules; modelCell{jSp}.grRules];
 end
 modelCom.genes = genes;
-modelCom.rxnGeneMat = sparse(rGMrow, rGMcol, rGMent, size(modelCom.S, 2), rGMn);
-%get community info
+% no grRules for community exchange reactions
+if sepUtEx
+    grRules = [grRules; repmat({''}, mCom * 2, 1)];
+else
+    grRules = [grRules; repmat({''}, mCom, 1)];
+end
+modelCom.grRules = grRules;
+% build .rules from .grRules
+modelCom = generateRules(modelCom, 0);
+% build .rxnGeneMat
+modelCom = buildRxnGeneMat(modelCom);
+
+% get community info
 infoCom = infoCom2indCom(modelCom,indCom,true,spAbbr,spName);
 % add infoCom and indCom into modelCom
 modelCom.infoCom = infoCom;
 modelCom.indCom = indCom;
+
+if isfield(modelCom, 'description') && iscell(modelCom.description)
+    modelCom.description = ['Community model built from ' strjoin(modelCom.description, ', ')];
+end
+if isfield(modelCom, 'osenseStr')
+    modelCom.osenseStr = 'max';
+end
 end
 
 function str = printCurrentModel(kSp, spAbbr, spName)

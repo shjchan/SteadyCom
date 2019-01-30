@@ -54,14 +54,18 @@ switch paramName
     case 'threads',     param = 1; %threads for general computation, 0 or -1 to turn on maximum no. of threads
     case 'verbFlag',	param = 3;%verbal dispaly
     case 'loadModel',   param = '';
-    case 'CplexParam',  %default Cplex parameter structure
+    case 'allowLoops',  param = true;
+    case 'CplexParam'  %default Cplex parameter structure
         [param.simplex.display, param.tune.display, param.barrier.display,...
-            param.sifting.display, param.conflict.display] = deal(0);
+            param.sifting.display, param.conflict.display, param.mip.tolerances.integrality] = deal(0);
         [param.simplex.tolerances.optimality, param.simplex.tolerances.feasibility] = deal(1e-9,1e-8);
         param.read.scale = -1;
+        param.clonelog = 0;
         
     %parameters for createCommModel
-    case 'metExId',     param = '[e]';
+    case 'metExId',     param = '[e]';  % identifer for extracellular metabolites
+    case 'sepUtEx',     param = true;  % true to have separate uptake and exchange reactions
+    case 'addExRxns',   param = true;   % true to add exchange reactions for ext. mets without ones.
         
     %parameters for SteadyComCplex
     case 'GRguess',     param = 0.2;%initial guess for growth rate
@@ -83,12 +87,23 @@ switch paramName
                                 'Ex',[],'flux',[],'iter0',[],'iter',[],'stat','');%result template
     %parameters for SteadyComFVACplex
     case 'optBMpercent',param = 99.99;
-    case 'rxnNameList', if isfield(modelCom.infoCom,'spBm'), param = modelCom.rxns(findRxnIDs(modelCom,modelCom.infoCom.spBm));else param = modelCom.rxns;end
-    case 'rxnFluxList', if isfield(modelCom.infoCom,'spBm'), param = modelCom.rxns(findRxnIDs(modelCom,modelCom.infoCom.spBm));else param = modelCom.rxns;end
+    case 'rxnNameList' 
+        if isfield(modelCom, 'infoCom') && isfield(modelCom.infoCom,'spBm')
+            param = modelCom.rxns(findRxnIDs(modelCom,modelCom.infoCom.spBm));
+        else
+            param = modelCom.rxns;
+        end
+    case 'rxnFluxList'
+        if isfield(modelCom, 'infoCom') && isfield(modelCom.infoCom,'spBm')
+            param = modelCom.rxns(findRxnIDs(modelCom,modelCom.infoCom.spBm));
+        else
+            param = modelCom.rxns;
+        end
     case 'BMmaxLB',     param = 1; %maximum biomass when it is unknown
     case 'BMmaxUB',     param = 1; %maximum biomass when it is unknown
     case 'optGRpercent',param = 99.99;
     case 'saveFVA',     param = '';
+    case 'loopMethod',  param = 1;
     
     %parameters for SteadyComPOACplex
     case 'Nstep',       param = 10;

@@ -657,9 +657,9 @@ else
 end
 if isfield(modelCom,'subSystems')
     if sepUtEx
-        modelCom.subSystems((col + 1): (col + mCom * 2)) = repmat({'community exchange'}, 2 * mCom, 1);
+        modelCom.subSystems((col + 1): (col + mCom * 2)) = {{'community exchange'}};
     else
-        modelCom.subSystems((col + 1): (col + mCom)) = repmat({'community exchange'}, mCom, 1);
+        modelCom.subSystems((col + 1): (col + mCom)) = {{'community exchange'}};
     end
 end
 %extend all other fields

@@ -93,10 +93,9 @@ function [sol, result, LP, LPminNorm, indLP] = SteadyComCplex(modelCom, options,
 %                      * Ut: uptake fluxes (mmol/h)
 %                      * Ex: export fluxes (mmol/h)
 %                      * flux: flux distribution for the original model
-%                        (the following 'iter' fields are status in each iteration:)
-%                        [GR | biomass X | biomass flux (`GR * X`) | max. infeas. of solution])
 %                      * iter0: stationary, no growth, `gr = 0`
-%                      * iter: iterations for finding max gr
+%                      * iter: info table in each iteration of the algorithm with the following fields:
+%                        [GR_LB | GR | GR_UB | biomass X | biomass flux (`GR * X`) | max. infeas. of solution | time]
 %                      * stat: status at the termination of the algorithm:
 %
 %                        * optimal: optimal growth rate found
@@ -140,6 +139,7 @@ end
     options, modelCom);
 
 %print level
+printSolverOutput = verbFlag > 3;
 verbFlag = max(min(verbFlag, 3), 0);
 pL = [0 10 5 1];
 pL = pL(verbFlag + 1);
@@ -166,16 +166,20 @@ else
     LP.Model.sense = 'maximize';
     indLP = [];
 end
+if ~printSolverOutput
+    LP.DisplayFunc = [];
+end
 % Make sure the feasibility tolerance used in CPLEX and in the main loop
 % are the same ('constructLPcom' has already reconciled the two tolerances)
 feasTol = LP.Param.simplex.tolerances.feasibility.Cur;
 LPminNorm = [];
+result = struct();
+[result.GRmax, result.vBM, result.BM, result.Ut, result.Ex, result.flux, ...
+    result.iter, result.stat] = deal([]);
+
 % terminate if only the LP structure is called as output
 if LPonly
-    result = struct();
-    [result.GRmax, result.vBM, result.BM, result.Ut, result.Ex, ...
-        result.flux, result.iter, result.iter0, sol] = deal([]);
-    result.stat = 'LPonly';
+    [sol, result.stat] = deal([], 'LPonly');
     return
 end
 
@@ -207,9 +211,6 @@ if nargin < 4
     % check the feasibility of the solution manually
     dev = checkSolFeas(LP);
 
-    result = struct();
-    [result.GRmax, result.vBM, result.BM, result.Ut, result.Ex, result.flux, ...
-        result.iter0, result.iter, result.stat] = deal([]);
     %terminate if time limit has been exceeded.
     if feas && LP.Solution.status == 11
         result.stat = 'time limit exceeded';
@@ -224,11 +225,11 @@ if nargin < 4
             BM0 = LP.Model.obj' * LP.Solution.x;
         end
     end
+    t0 = toc(t);
     if BM0 < BMtolAbs
         %if no biomass is formed, infeasible. Terminate.
         if verbFlag
-            t0 = toc(t);
-            fprintf('Model infeasible at maintenance. Time elapsed: %.0f / %.0f sec\n', t0, t0);
+            fprintf('Model infeasible at maintenance. Time elapsed: %.0f sec\n', t0);
         end
         sol = [];
         result.stat = 'infeasible';
@@ -237,8 +238,7 @@ if nargin < 4
     else
         %record the current result if feasible
         if verbFlag
-            t0 = toc(t);
-            fprintf('Model feasible at maintenance. Time elapsed: %.0f / %.0f sec\n', t0, t0);
+            fprintf('Model feasible at maintenance. Time elapsed: %.0f sec\n', t0);
         end
         sol = LP.Solution;
         if ~isempty(saveModel)
@@ -261,8 +261,8 @@ if nargin < 4
             result.Ex(result.Ex < 0) = 0;
         end
         result.flux = LP.Solution.x(1:n);
-        result.iter0 = [0 BM0 0 dev];
-        result.iter = [];
+        iter = [iter; 0, 0, 0, inf, BM0, 0, dev, 0, t0];
+        result.iter = iter;
         result.stat = 'maintenance';
     end
 
@@ -298,12 +298,11 @@ if nargin < 4
                 BMref = LP.Model.obj' * LP.Solution.x;
             end
         end
-
-        iter = [iter; 0 GR0 BMref GR0 * BMref dev 0];
+        t1 = toc(t);
+        iter = [iter; 0, 0, GR0, inf, BMref, GR0 * BMref, dev, 0, t1 - t0];
         if BMref < BMtolAbs
             %if no biomass can be formed, the model can only stay at maintenance.
             if verbFlag
-                t1 = toc(t);
                 fprintf('Model infeasible at a minimal growth rate (%.6f). Time elapsed: %.0f / %.0f sec\n.', GR0, t1 - t0, t1);
             end
             result.iter = iter;
@@ -311,10 +310,9 @@ if nargin < 4
         else
             %able to grow. Compute bounds
             if verbFlag
-                t1 = toc(t);
                 fprintf('Model feasible at a minimal growth (%.6f). Time elapsed: %.0f / %.0f sec.\nLook for upper and lower bounds...\n', GR0, t1 - t0, t1);
-                t0 = t1;
             end
+            t0 = t1;
             sol = LP.Solution;
             if ~isempty(saveModel)
                 LP.writeBasis([saveModel '.bas']);
@@ -383,6 +381,7 @@ grUB = Inf;%upper bound for growth rate
 grLBrecord = grLB;%vector recording all intermediate grLB
 grUBrecord = grUB;%vector recording all intermediate grUB
 guessMethod = 0; %guess used for updating the growth rate
+guessMethodText = {'given'; 'simple guess'; 'LB * 2'; 'bisection'; '1% change'};
 numInstab = false; %flag for numerical instability
 grUnstable = []; %growth rate at which numerical instability occurs
 optionsf0 = optimset; %matlab optimization parameters
@@ -407,8 +406,8 @@ optionsf0.TolX = GRtol; %tolerance for the root found
 %on the parameter 'algorithm'
 col1disp = num2str(max([log10(maxIter)+1,4]));
 if pL
-    fprintf(['%' col1disp 's  %8s  %8s  %8s  Time elapsed (iteration/total)\n'],...
-        'Iter','LB','To test', 'UB');
+    fprintf(['%' col1disp 's  %8s  %8s  %8s  %-12s  Time elapsed (iteration/total)\n'],...
+        'Iter','LB','To test', 'UB', 'Method');
 end
 if 0
     %totally solved by fzero (unused)
@@ -421,18 +420,14 @@ else
     while true
         %solve for initial guess
         k = k + 1;
+        iterCur = [k, grLB, grCur, grUB];
         if mod(k, pL) == 0
-            t1 = toc(t);
             if ~numInstab
-                fprintf(['%' col1disp 'd  %8.6f  %8.6f  %8.6f  %.0f / %.0f sec\n'],...
-                    k, grLB, grCur, grUB, t1 - t0, t1);
+                fprintf(['%' col1disp 'd  %8.6f  %8.6f  %8.6f  '], k, grLB, grCur, grUB);
             else
-                fprintf(['%' col1disp 'd  %8.6f  %8.6f  %8.6f  %.0f / %.0f sec (numerical instability)\n'],...
-                    k, grLB, grCur, grUB, t1 - t0, t1);
+                fprintf(['%' col1disp 'd  %8.6f  %8.6f  %8.6f  '], k, grLB, grCur, grUB);
                 numInstab = false;
             end
-            %fprintf('%.0f\t%.6f\t%.6f\tTime elapsed: %.0f / %.0f sec\n', k, grLB, grUB, t1 - t0, t1);
-            t0 = t1;
         end
         %update growth rate
         LP.Model.A = SteadyComSubroutines('updateLPcom', modelCom, grCur, GRfx, [], LP.Model.A, BMgdw);
@@ -490,9 +485,19 @@ else
             end
             kLU = kLU + ~k1LB;
         end
+        t1 = toc(t);
+        if mod(k, pL) == 0
+            if ~numInstab
+                fprintf('%-12s  %.0f / %.0f sec\n', guessMethodText{guessMethod + 1}, t1 - t0, t1);
+            else
+                fprintf('%-12s  %.0f / %.0f sec (numerical instability)\n', guessMethodText{guessMethod + 1}, t1 - t0, t1);
+                numInstab = false;
+            end
+        end
         %record results for the current iteration
-        iter = [iter; k, grCur, BMcur, grCur * BMcur, dev, guessMethod];
-
+        iter = [iter; iterCur, BMcur, grCur * BMcur, dev, guessMethod, t1 - t0];
+        t0 = t1;
+        
         % condition for switching to fzero or concluding GRmax = 0:
         %   kLU >= 2 to ensure neither of the bounds is the initial guess.
         % Algorithm:
@@ -552,6 +557,7 @@ else
                 % to supply function values [dBMneg, dBMpos] for the initial
                 % points to save the time for evaluting the initial points)
                 GRmax = fzero(@(x) LP4fzero(x, LP), [grLB, grUB], optionsf0);
+                GRmax = floor(GRmax / GRtol) * GRtol;  % round down within the tolerance level to avoid numerical difficulty
                 %the final LP may not be at GRmax
                 [~, BMcur] = LP4fzero(GRmax, LP);
                 break
@@ -596,39 +602,29 @@ else
             %Get the new guess for the growth rate using simple guess or bisection
             %Simple guess
             grNext = updateGRguess(BMcur, grCur);
-            if grNext >= grUB * 0.99 || algorithm == 3
-                %bisection if designated or the guess is too close to the
-                %upper bound
-                if isinf(grUB)
-                    grCur = grLB * 2;
-                else
-                    grCur = (grUB + grLB) / 2;
-                end
-                 guessMethod = 1;
-            elseif grNext <= max([grLB * 1.01, GRtol])
-                %if the guess is too close to the lower bound
-                if ~isinf(grUB)
-                    %bisection if finite UB has been found
-                    grCur = (grUB + grLB) / 2;
-                else
-                    % 1% larger than LB if UB not found yet
-                    grCur = grLB * 1.01;
-                end
+            grBisection = (grUB + grLB) / 2;
+            gr1percent = max(ceil((grNext > grCur) * grCur * 1.01 / GRtol) * GRtol + floor((grNext <= grCur) * grCur * 0.99 / GRtol) * GRtol, GRtol);
+            [grNext, grBisection, gr1percent] = deal(round(grNext, -floor(log10(GRtol))), ...
+                round(grBisection, -floor(log10(GRtol))), round(gr1percent, -floor(log10(GRtol))));
+            guess1percent = abs(grNext - grCur) <= 1e-2 * grCur;
+            if isinf(grUB) && algorithm == 3
+                % LB * 2 if UB is not found yet and bisection is chosen
+                grCur = max(grLB, GRtol) * 2;
                 guessMethod = 2;
-            elseif abs(grNext - grCur) < 1e-2 * grCur
-                %When the step size is less than 1%, should be quite close to
-                %the solution but still not bounded from the
-                %other side. Use a 1% distance to get a bound
-                if grNext > grCur
-                    grCur = grCur * 1.01;
-                else
-                    grCur = grCur * 0.99;
-                end
+            elseif ~isinf(grUB) && (algorithm == 3 || grNext >= grUB || grNext <= grLB ...
+                    || (algorithm - floor(algorithm) < 0.1 && guess1percent) ...
+                    || (grNext > grCur && grBisection <= gr1percent) || (grNext <= grCur && grBisection >= gr1percent))
+                % bisection if it is chosen or the guess is too close to either bound or it is smaller than 1% change
+                grCur = grBisection;
                 guessMethod = 3;
+            elseif guess1percent
+                % guess has <= 1% change. Use 1% change if UB is not found yet or algorithm 1.1/2.1 is chosen
+                grCur = gr1percent;
+                guessMethod = 4;
             else
-                %new guess from simple guessing
+                % new guess from simple guessing
                 grCur = grNext;
-                guessMethod = 0;
+                guessMethod = 1;
             end
         end
     end
@@ -640,7 +636,7 @@ end
 kGRadjust = 0;
 while ~condition2(BMcur, GRmax) && GRmax > GRtol && kGRadjust <= 10
     kGRadjust = kGRadjust + 1;
-    GRmax = GRmax - GRtol / 10;
+    GRmax = roundDownBound(GRmax, GRtol / GRmax / 10);
     LP.Model.A =SteadyComSubroutines('updateLPcom', modelCom, GRmax, GRfx, [], LP.Model.A, BMgdw);
     feas = true;
     try
@@ -684,9 +680,12 @@ end
 % reduced cost (e.g. to find out limiting substrate)
 sol = LP.Solution;
 % add maximum biomass as a constraint to ensure that the model is feasible for further analysis (e.g. FVA)
-LP.addRows(BMcur * (1 - feasTol * 100),...
+BMcur = roundDownBound(BMcur);
+BMlb = roundDownBound(min(BMcur, BMweight), feasTol * 100);
+BMub = roundUpBound(min(BMcur, BMweight));  %BMcur;%min(BMcur, BMweight);
+LP.addRows(BMlb,...
     sparse(ones(nSp,1), (n+1):(n+nSp), ones(nSp,1), 1, size(LP.Model.A,2)),...
-    BMcur,'UnityBiomass');
+    BMub,'UnityBiomass');
 LP.Model.obj(:) = 0;
 LP.Model.sense = 'minimize';
 feas = true;
@@ -715,7 +714,7 @@ kBMadjust = 0;
 BMmaxLB = LP.Model.lhs(end);
 while (~isfield(LP.Solution, 'x') || dev > feasTol) && kBMadjust < 10
     kBMadjust = kBMadjust + 1;
-    LP.Model.lhs(end) = BMmaxLB * (1 - feasTol/(11 - kBMadjust));
+    LP.Model.lhs(end) = roundDownBound(BMmaxLB, feasTol/(11 - kBMadjust));
     LP.solve();
     if LP.Solution.status == 11
         result.stat = 'time limit exceeded';
@@ -792,7 +791,14 @@ if GRmax > 0
     end
     result.flux = flux(1:n);
 end
-result.iter = iter;
+result.iter = array2table(iter(:, 2:end), 'VariableNames', {'mu_LB', 'mu_test', 'mu_UB', 'X', 'muX', 'infeas', 'method', 'time'});
+result.iter.method = guessMethodText(result.iter.method + 1);
+[rowNames, k] = deal({'maintenance'}, 2);
+if iter(2, 1) == 0
+    [rowNames, k] = deal([rowNames; {'min. growth'}], 3);
+end
+result.iter.Properties.RowNames = [rowNames; cellstr(num2str(iter(k:end, 1)))];
+result.iter.Properties.VariableUnits = {'h^{-1}', 'h^{-1}', 'h^{-1}', 'gdw', 'gdw h^{-1}', '', '', 'sec'};
 if pL
     if numInstab
         fprintf('Numerical instability for feasibility during the iterations.\n');
@@ -803,7 +809,7 @@ if pL
     end
     fprintf('Maximum community growth rate: %.6f (abs. error < %.1g).\tTime elapsed: %.0f sec\n', GRmax, GRtol, toc(t));
 end
-
+result.time = toc(t);
 if ~isempty(saveModel)
     LP.writeModel([saveModel '.mps']);
     LP.writeBasis([saveModel '.bas']);
@@ -872,7 +878,6 @@ end
 %% construct LP
 %create CPLEX interactive object
 LP = Cplex('maxGrCom');
-LP.DisplayFunc = [];
 nVar = 0;
 nCon = 0;
 %optimization sense
@@ -1128,6 +1133,30 @@ function [dBM, BMcur] = LP4fzero2(grCur, LP, modelCom, GRfx, feasTol, BMequiv, G
         end
     end
     dBM = (BMequiv * GR0 / grCur) - BMcur;
+end
+
+function val = roundDownBound(val, tol)
+if nargin < 2
+    tol = 0;
+end
+if tol > 0
+    factor = 10 ^ round(abs(log10(tol))) - (floor(log10(abs(val) * (1 - tol))) + 1);
+else
+    factor = 10 ^ round(6 - floor(log10(abs(val))) + 1);
+end
+val = floor(val * (1 - tol) * factor) / factor;
+end
+
+function val = roundUpBound(val, tol)
+if nargin < 2
+    tol = 0;
+end
+if tol > 0
+    factor = 10 ^ round(abs(log10(tol))) - (floor(log10(abs(val) * (1 + tol))) + 1);
+else
+    factor = 10 ^ round(6 - floor(log10(abs(val))) + 1);
+end
+val = ceil(val * (1 + tol) * factor) / factor;
 end
 
 function yn = ErrBecauseInfeas(ME)
